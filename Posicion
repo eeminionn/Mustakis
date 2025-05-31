@@ -1,0 +1,115 @@
+#include <QTRSensors.h>
+
+#define BOTON 12
+#define LED 2
+
+#define AIN1 16
+#define AIN2 17
+#define PWMA 4
+
+#define BIN1 5
+#define BIN2 18
+#define PWMB 19
+
+const uint8_t SensorCount = 8;
+uint16_t sensorValues[SensorCount];
+
+int sensorValues_min[SensorCount] = {4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095};
+int sensorValues_max[SensorCount] = {0, 0, 0, 0, 0, 0, 0, 0};
+int sensorValues_norm[SensorCount];
+
+QTRSensors qtr;
+
+bool online = false;
+int last_pos = 0;
+int pos = 0;
+
+void setup() {
+  Serial.begin(115200);
+
+  qtr.setTypeAnalog();
+  qtr.setSensorPins((const uint8_t[]){36, 39, 34, 35, 32, 33, 25, 26}, SensorCount);
+  qtr.setEmitterPin(27);
+
+  pinMode(LED, OUTPUT);
+  pinMode(BOTON, INPUT);
+
+  Serial.println("Presiona el botón para comenzar calibración...");
+  while (digitalRead(BOTON) == LOW);
+  delay(500);
+  calibrarSensores();
+  Serial.println("¡Calibración terminada!");
+  delay(500);
+}
+
+void loop() {
+  qtr.read(sensorValues);
+  normalizarValores();
+
+  pos = calcularPosicion();
+
+  // Imprimir valores normalizados y posición
+  for (int i = 0; i < SensorCount; i++) {
+    Serial.print(sensorValues_norm[i]);
+    Serial.print("\t");
+  }
+  Serial.print("Posición: ");
+  Serial.println(pos);
+  delay(100);
+}
+
+void calibrarSensores() {
+  Serial.println("Calibrando sensores...");
+  for (int j = 0; j < 100; j++) {
+    qtr.read(sensorValues);
+    for (int i = 0; i < SensorCount; i++) {
+      if (sensorValues[i] < sensorValues_min[i]) sensorValues_min[i] = sensorValues[i];
+      if (sensorValues[i] > sensorValues_max[i]) sensorValues_max[i] = sensorValues[i];
+    }
+    delay(20);
+  }
+
+  Serial.println("Valores mínimos:");
+  for (int i = 0; i < SensorCount; i++) {
+    Serial.print(sensorValues_min[i]);
+    Serial.print("\t");
+  }
+  Serial.println();
+
+  Serial.println("Valores máximos:");
+  for (int i = 0; i < SensorCount; i++) {
+    Serial.print(sensorValues_max[i]);
+    Serial.print("\t");
+  }
+  Serial.println();
+}
+
+void normalizarValores() {
+  for (int i = 0; i < SensorCount; i++) {
+    int val = sensorValues[i];
+    if (val < sensorValues_min[i]) val = sensorValues_min[i];
+    if (val > sensorValues_max[i]) val = sensorValues_max[i];
+    sensorValues_norm[i] = map(val, sensorValues_min[i], sensorValues_max[i], 0,100);
+  }
+}
+
+int calcularPosicion() {
+  // Pesos simétricos centrados: -3.5 a 3.5
+  float pesos[SensorCount] = {-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5};
+  float numerador = 0;
+  int denominador = 0;
+
+  for (int i = 0; i < SensorCount; i++) {
+    numerador += pesos[i] * sensorValues_norm[i];
+    denominador += sensorValues_norm[i];
+  }
+
+  if (denominador > 100) {
+    online = true;
+    last_pos = int(numerador * 100.0 / denominador); // escala posición
+    return last_pos;
+  } else {
+    online = false;
+    return last_pos < 0 ? -255 : 255;
+  }
+}
