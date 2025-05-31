@@ -1,0 +1,218 @@
+#include <QTRSensors.h>
+
+// Pines ESP32 para sensores y motores
+#define BOTON 12
+#define LED 2
+
+// Pines de motor TB6612FNG
+#define AIN1 16
+#define AIN2 17
+#define PWMA 4
+
+#define BIN1 5
+#define BIN2 18
+#define PWMB 19
+
+// PWM para ESP32
+const int freq = 5000;
+const int resolution = 8;
+const int canalA = 0;
+const int canalB = 1;
+
+// Sensores
+const uint8_t SensorCount = 8;
+uint16_t sensorValues[SensorCount];
+int sensorValues_min[SensorCount] = {4095, 4095, 4095, 4095, 4095, 4095, 4095, 4095};
+int sensorValues_max[SensorCount] = {0, 0, 0, 0, 0, 0, 0, 0};
+int sensorValues_norm[SensorCount];
+
+QTRSensors qtr;
+
+// Variables de posición
+bool online = false;
+int last_pos = 0;
+int pos = 0;
+
+void setup() {
+  Serial.begin(115200);
+
+  qtr.setTypeAnalog();
+  qtr.setSensorPins((const uint8_t[]) {
+    36, 39, 34, 35, 32, 33, 25, 26
+  }, SensorCount);
+  qtr.setEmitterPin(27);
+
+  pinMode(LED, OUTPUT);
+  pinMode(BOTON, INPUT);
+
+  TB6612FNG_init();
+
+  Serial.println("Presiona el botón para comenzar calibración...");
+  while (digitalRead(BOTON) == LOW) {
+    delay(10);  // Permite evitar watchdog
+  }
+
+  delay(500);
+
+  calibrarSensores();
+  Serial.println("¡Calibración terminada!");
+  delay(500);
+  while (digitalRead(BOTON) == LOW) {
+    delay(10);  // Permite evitar watchdog
+  }
+}
+
+void loop() {
+  qtr.read(sensorValues);
+  normalizarValores();
+  pos = calcularPosicion();
+  corregirMotores(pos);
+
+  Serial.print("Posición: ");
+  Serial.println(pos);
+  delay(50);
+}
+
+// ===================== CALIBRACIÓN ========================
+
+void calibrarSensores() {
+  Serial.println("Calibrando sensores...");
+  for (int j = 0; j < 300; j++) {
+    qtr.read(sensorValues);
+    for (int i = 0; i < SensorCount; i++) {
+      if (sensorValues[i] < sensorValues_min[i]) sensorValues_min[i] = sensorValues[i];
+      if (sensorValues[i] > sensorValues_max[i]) sensorValues_max[i] = sensorValues[i];
+    }
+    delay(20);
+    yield();  // Evita reinicio por watchdog
+  }
+
+  Serial.println("Valores mínimos:");
+  for (int i = 0; i < SensorCount; i++) {
+    Serial.print(sensorValues_min[i]);
+    Serial.print("\t");
+  }
+  Serial.println();
+
+  Serial.println("Valores máximos:");
+  for (int i = 0; i < SensorCount; i++) {
+    Serial.print(sensorValues_max[i]);
+    Serial.print("\t");
+  }
+  Serial.println();
+}
+
+// ===================== NORMALIZACIÓN ========================
+
+void normalizarValores() {
+  for (int i = 0; i < SensorCount; i++) {
+    int val = sensorValues[i];
+    if (val < sensorValues_min[i]) val = sensorValues_min[i];
+    if (val > sensorValues_max[i]) val = sensorValues_max[i];
+    sensorValues_norm[i] = map(val, sensorValues_min[i], sensorValues_max[i], 0, 100); // Línea negra
+  }
+}
+
+// ===================== POSICIÓN ========================
+
+int calcularPosicion() {
+  float pesos[SensorCount] = { -3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5};
+  float numerador = 0;
+  int denominador = 0;
+
+  for (int i = 0; i < SensorCount; i++) {
+    numerador += pesos[i] * sensorValues_norm[i];
+    denominador += sensorValues_norm[i];
+  }
+
+  if (denominador > 100) {
+    online = true;
+    last_pos = int(numerador * 100.0 / denominador);
+    return last_pos;
+  } else {
+    online = false;
+    return last_pos < 0 ? -255 : 255;
+  }
+}
+
+// ===================== CONTROL DE MOTORES ========================
+
+void TB6612FNG_init() {
+  pinMode(AIN1, OUTPUT);
+  pinMode(AIN2, OUTPUT);
+  pinMode(BIN1, OUTPUT);
+  pinMode(BIN2, OUTPUT);
+
+  ledcSetup(canalA, freq, resolution);
+  ledcAttachPin(PWMA, canalA);
+
+  ledcSetup(canalB, freq, resolution);
+  ledcAttachPin(PWMB, canalB);
+}
+
+// Motor izquierdo invertido
+void MotorIz(int value) {
+  if (value >= 0) {
+    digitalWrite(AIN1, LOW);     // antes HIGH
+    digitalWrite(AIN2, HIGH);    // antes LOW
+  } else {
+    digitalWrite(AIN1, HIGH);    // antes LOW
+    digitalWrite(AIN2, LOW);     // antes HIGH
+    value = -value;
+  }
+  ledcWrite(canalA, constrain(value, 0, 255));
+}
+
+// Motor derecho invertido
+void MotorDe(int value) {
+  if (value >= 0) {
+    digitalWrite(BIN1, HIGH);     // antes HIGH
+    digitalWrite(BIN2, LOW);    // antes LOW
+  } else {
+    digitalWrite(BIN1, LOW);    // antes LOW
+    digitalWrite(BIN2, HIGH);     // antes HIGH
+    value = -value;
+  }
+  ledcWrite(canalB, constrain(value, 0, 255));
+}
+
+
+
+void Motores(int left, int right) {
+  MotorIz(left);
+  MotorDe(right);
+}
+
+// ===================== CORRECCIÓN CON IF ========================
+
+void corregirMotores(int pos) {
+  int velAlta = 120;
+  int velMedia = 90;
+  int velBaja = 60;
+
+  if (pos > -20 && pos < 20) {
+    // Centrado
+    Motores(velAlta, velAlta);
+  } else if (pos >= 20 && pos < 60) {
+    // Ligeramente a la izquierda
+    Motores(velMedia, velAlta);
+  } else if (pos >= 60 && pos < 120) {
+    // Muy a la izquierda
+    Motores(velBaja, velAlta);
+  } else if (pos >= 120) {
+    // Totalmente a la izquierda
+    Motores(-velBaja, velAlta);
+  } else if (pos <= -20 && pos > -60) {
+    // Ligeramente a la derecha
+    Motores(velAlta, velMedia);
+  } else if (pos <= -60 && pos > -120) {
+    // Muy a la derecha
+    Motores(velAlta, velBaja);
+  } else if (pos <= -120) {
+    // Totalmente a la derecha
+    Motores(velAlta, -velBaja);
+  } else {
+    // No detecta línea
+    Motores(0, 0);
+  }
+}
